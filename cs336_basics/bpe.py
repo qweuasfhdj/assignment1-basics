@@ -2,7 +2,11 @@ import os.path
 
 import regex as re
 from collections import defaultdict
+from typing import Iterable, Iterator
+import json
 import sys
+
+from torchgen.api.types import boolT
 from tqdm.contrib.concurrent import process_map
 import pathlib
 # GPT2's token split
@@ -46,6 +50,8 @@ def count_words(text):
 
 
 def get_max_pair(pair_count):
+    if len(pair_count) == 0:
+        return None
     max_pair, _ = max(pair_count.items(), key=lambda pair: (pair[1], pair[0]))
     return max_pair
 
@@ -132,8 +138,6 @@ def update_count(word_count, pair_count, merge_pair):
     return new_word_count, new_pair_count
 
 
-
-
 def train_bpe(input_path, vocab_size, special_tokens):
     """
     :param input_path:
@@ -147,7 +151,7 @@ def train_bpe(input_path, vocab_size, special_tokens):
         word_dicts = list(map(count_words, chunks))
     else:
         # 返回一个List of result. concurrent 操作。
-        word_dicts = process_map(count_words, chunks, chunksize=10)
+        word_dicts = process_map(count_words, chunks, chunksize=1000)
 
     word_count = merge_dicts(word_dicts)
     pair_count = count_pair(word_count)
@@ -158,12 +162,109 @@ def train_bpe(input_path, vocab_size, special_tokens):
     merges = []
     for i in range(n_merges):
         max_pair = get_max_pair(pair_count)
+        if max_pair is None:
+            continue
         vocab[initial_vocab_size + i] = max_pair[0] + max_pair[1]
         merges.append(max_pair)
         # update pair count
         word_count, pair_count = update_count(word_count, pair_count, max_pair)
 
     return vocab, merges
+
+def split_to_words(text):
+    return PAT.findall(text)
+
+def apply_merges(word_bytes, merges, vocab_to_id):
+    word_bytes = list(word_bytes)
+    while True:
+        min_token_id = float('inf')
+        best_pair_idx = -1
+        merged = None
+
+        for i in range(len(word_bytes) - 1):
+            pair = (word_bytes[i], word_bytes[i + 1])
+            if pair in merges:
+                combined = pair[0] + pair[1]
+                token_id = vocab_to_id[combined]
+                if token_id is not None and token_id < min_token_id:
+                    # BPE 的训练过程中，先学到的合并规则优先级更高
+                    # 词汇表通常是按 token_id 排序的，早期学到的合并有更小的 ID
+                    # 这确保了合并顺序与训练时一致
+                    min_token_id = min(min_token_id, token_id)
+                    best_pair_idx = i
+                    merged = combined
+
+        if best_pair_idx == -1:
+            break
+
+        word_bytes = (
+            word_bytes[:best_pair_idx] +
+            [merged] +
+            word_bytes[best_pair_idx + 2:]
+        )
+
+    return tuple(word_bytes)
+
+def encode_merged(text, merges, vocab_to_id):
+    """
+    text -> word_list -> word bytes -> find merges and map to merged tokens
+    :param text:
+    :param merges:
+    :param vocab_to_id:
+    :return:
+    """
+    word_list = split_to_words(text)
+    tokens = []
+    for word in word_list:
+        word_bytes = word2bytes(word)
+        merged_word_bytes = apply_merges(word_bytes, merges, vocab_to_id)
+        tokens.extend(vocab_to_id[i] for i in merged_word_bytes)
+    return tokens
+
+class Tokenizer:
+    def __init__(self, vocab, merges, special_tokens=None):
+        self.vocab = vocab
+        self.merges = set(merges)
+        self.special_tokens = special_tokens if special_tokens else []
+        self.vocab_to_id = {v:k for k,v in self.vocab.items()}
+
+        for token_bytes in self.special_tokens:
+            if token_bytes not in self.vocab_to_id:
+                new_id = len(self.vocab)
+                self.vocab_to_id[token_bytes] = new_id
+                self.vocab[new_id] = token_bytes
+
+    @classmethod
+    def from_file(cls, vocab_filepath, merges_filepath, special_tokens=None):
+        with open(vocab_filepath, "r", encoding="utf-8") as f:
+            vocab_data = json.load(f)
+            # Optional: convert keys to int if stored as strings
+            vocab = {int(k): bytes(v, 'latin1') if isinstance(v, str) else bytes(v)
+                     for k, v in vocab_data.items()}
+        # load merges
+        with open(merges_filepath, "r", encoding="utf-8") as mf:
+            lines = mf.readlines()
+            merge_pairs = [tuple(line.strip().split()) for line in lines if not line.startswith('#') and line.strip()]
+            # Convert to byte-pairs
+            merges = [(a.encode('utf-8'), b.encode('utf-8')) for a, b in merge_pairs]
+        return cls(vocab=vocab, merges=merges, special_tokens=special_tokens)
+
+    def encode(self, text: str) -> list[int]:
+        chunks = split_by_special(text, self.special_tokens, drop_special=False)
+        tokens = []
+        for chunk in chunks:
+            if self.special_tokens and chunk in self.special_tokens:
+                tokens.append(self.vocab_to_id[chunk.encode('utf-8')])
+            else:
+                tokens.extend(encode_merged(chunk, self.merges, self.vocab_to_id))
+        return tokens
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for chunk in iterable:
+            yield from self.encode(chunk)
+
+    def decode(self, ids: list[int]) -> str:
+        return b''.join(self.vocab[t] for t in ids).decode('utf-8', errors='replace')
 
 
 if __name__ == "__main__":
