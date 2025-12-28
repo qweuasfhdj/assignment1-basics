@@ -10,6 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 import regex as re
 from cs336_basics.bpe import *
+from cs336_basics.linear_layer import *
 
 def run_linear(
     d_in: int,
@@ -29,8 +30,10 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    device, dtype = in_features.device, in_features.dtype
+    model = LinearLayer(d_in, d_out, device=device, dtype=dtype)
+    model.load_state_dict({'weights': weights})
+    return model.forward(in_features)
 
 
 def run_embedding(
@@ -51,8 +54,10 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    device, dtype = weights.device, weights.dtype
+    model = Embedding(vocab_size, d_model, device=device, dtype=dtype)
+    model.load_state_dict({"weights" : weights})
+    return model.forward(token_ids)
 
 
 def run_swiglu(

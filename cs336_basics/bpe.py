@@ -4,6 +4,7 @@ import regex as re
 from collections import defaultdict
 from typing import Iterable, Iterator
 import json
+import torch
 import sys
 
 from torchgen.api.types import boolT
@@ -268,9 +269,17 @@ class Tokenizer:
 
 
 if __name__ == "__main__":
-    test_path = "/Users/a1/Desktop/cs336n/assignment1-basics/tests/fixtures/local_test.txt"
-    vocab, merges = train_bpe(test_path,
-                              vocab_size=500,
-                              special_tokens=["<|endoftext|>"])
-    print(vocab)
-    print(merges)
+    # test_path = "/Users/a1/Desktop/cs336n/assignment1-basics/tests/fixtures/local_test.txt"
+    # vocab, merges = train_bpe(test_path,
+    #                           vocab_size=500,
+    #                           special_tokens=["<|endoftext|>"])
+    # print(vocab)
+    # print(merges)
+
+
+    if torch.backends.mps.is_available():
+        mps_device = torch.device("mps")
+        x = torch.ones(1, device=mps_device)
+        print(x)
+    else:
+        print("MPS device not found.")
