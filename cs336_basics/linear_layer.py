@@ -1,5 +1,6 @@
 import torch
 import einx
+import numpy as np
 
 class LinearLayer(torch.nn.Module):
     def __init__(self, in_features, out_features, device=None, dtype=None):
@@ -30,8 +31,26 @@ class Embedding(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
        return self.weights[x]
 
+class RmsNorm(torch.nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None):
+        super(RmsNorm, self).__init__()
+        self.d_model = d_model
+        self.device = device
+        self.dtype = dtype
+        self.weights = torch.nn.Parameter(torch.randn(d_model, device=device, dtype=dtype))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+        rms = torch.sqrt(torch.sum(x**2, dim= -1, keepdim=True) / self.d_model + self.eps)
+        result = x / rms * self.weights
+        return result.to(in_dtype)
 
 
 if __name__ == "__main__":
     model = LinearLayer(10, 10, device=torch.device('cpu'))
     print(model.state_dict())
+    x = np.ones((16, 8, 4))
+    tmp = einx.sum("a [b] c -> a c", x).shape
+    print(tmp)
