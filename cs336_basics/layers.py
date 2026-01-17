@@ -4,7 +4,6 @@ import torch
 import einx
 from jaxtyping import Bool, Float, Int
 from torch import Tensor, FloatTensor
-import numpy as np
 
 class LinearLayer(torch.nn.Module):
     def __init__(self, in_features, out_features, device=None, dtype=None):
@@ -177,6 +176,82 @@ class MultiHeadAttention(torch.nn.Module):
         scores = einx.rearrange("... num_heads seq_len d_k -> ... seq_len (num_heads d_k)", scores)
 
         return self.o(scores)
+
+class TransformerBlock(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, use_rope: bool = True,
+                 rope_theta: float = 10000.0,
+                 device: torch.device = None, dtype: torch.dtype = None):
+        super(TransformerBlock, self).__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.device = device
+        self.dtype = dtype
+        self.use_rope = use_rope
+        self.rms_norm_1 = RmsNorm(d_model=d_model, device=device, dtype=dtype)
+        self.casual_multihead_attention = MultiHeadAttention(d_model=d_model, num_heads=num_heads, use_rope=use_rope,
+                                                             max_seq_len=max_seq_len, theta=rope_theta, device=device,
+                                                             dtype=dtype)
+        self.rms_norm_2 = RmsNorm(d_model=d_model, device=device, dtype=dtype)
+        self.ff1 = SwiGLU(d_model=d_model, d_ff=d_ff)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        B, S, D = x.shape
+        attention_score = self.casual_multihead_attention(self.rms_norm_1(x), token_positions=token_positions)
+        x = x + attention_score
+
+        ff_out = self.ff1(self.rms_norm_2(x))
+        return x + ff_out
+
+class TransformerLM(torch.nn.Module):
+    def __init__(self,
+                 vocab_size: int,
+                 context_length: int,
+                 num_layers: int,
+                 d_model: int,
+                 num_heads: int,
+                 d_ff: int,
+                 rope_theta: float = 10000.0,
+                 device: torch.device = None, dtype: torch.dtype = None):
+
+        super(TransformerLM, self).__init__()
+        self.token_embeddings = Embedding(vocab_size, d_model, device=device, dtype=dtype)
+
+        self.blocks = torch.nn.ModuleList([TransformerBlock(d_model=d_model, num_heads=num_heads, d_ff=d_ff,
+                                                            max_seq_len=context_length, rope_theta=rope_theta,
+                                                            use_rope=True, device=device, dtype=dtype)
+                                                            for _ in range(num_layers)])
+        self.norm_final = RmsNorm(d_model=d_model, device=device, dtype=dtype)
+        self.lm_head = LinearLayer(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
+        self.context_length = context_length
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        b, s = token_ids.shape
+        if s > self.context_length:
+            raise ValueError(f"seq_len {s} exceeds context_length {self.context_length}")
+
+        x = self.token_embeddings(token_ids)
+
+        pos = torch.arange(0, s, device=x.device)
+
+        for block in self.blocks:
+            x = block(x, token_positions = pos)
+
+        x = self.lm_head(self.norm_final(x))
+        return x
+
+def _copy_param(target: torch.Tensor, source: torch.Tensor) -> None:
+    """
+    Copy `source` into `target` in-place, transposing `source` if that
+    is what makes the shapes line up.
+    """
+    if source.shape == target.shape:
+        target.data.copy_(source)
+    elif source.T.shape == target.shape:
+        target.data.copy_(source.T)
+    else:
+        raise ValueError(f"Shape mismatch: cannot load parameter of shape {source.shape} "
+                         f"into tensor of shape {target.shape}")
 
 if __name__ == "__main__":
     # model = LinearLayer(10, 10, device=torch.device('cpu'))

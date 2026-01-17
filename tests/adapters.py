@@ -11,6 +11,7 @@ from torch import Tensor
 import regex as re
 from cs336_basics.bpe import *
 from cs336_basics.layers import *
+from cs336_basics.layers import _copy_param
 
 def run_linear(
     d_in: int,
@@ -304,7 +305,26 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    device = in_features.device
+    dtype = in_features.dtype
+    block = TransformerBlock(d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=max_seq_len, rope_theta=theta,
+                             use_rope=True, device=device, dtype=dtype)
+
+    block.rms_norm_1.load_state_dict({"weights": weights["ln1.weight"]})
+    block.rms_norm_2.load_state_dict({"weights": weights["ln2.weight"]})
+
+    block.ff1.linear_1.load_state_dict({"weights": weights["ffn.w1.weight"]})
+    block.ff1.linear_2.load_state_dict({"weights": weights["ffn.w2.weight"]})
+    block.ff1.linear_3.load_state_dict({"weights": weights["ffn.w3.weight"]})
+
+    block.casual_multihead_attention.q.load_state_dict({"weights": weights["attn.q_proj.weight"]})
+    block.casual_multihead_attention.k.load_state_dict({"weights": weights["attn.k_proj.weight"]})
+    block.casual_multihead_attention.v.load_state_dict({"weights": weights["attn.v_proj.weight"]})
+    block.casual_multihead_attention.o.load_state_dict({"weights": weights["attn.output_proj.weight"]})
+
+    B, S, _ = in_features.shape
+    positions = torch.arange(S, device=device)
+    return block(in_features, positions)
 
 
 def run_transformer_lm(
@@ -387,8 +407,41 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    device = in_indices.device
+    dtype  = next(iter(weights.values())).dtype
 
+    model = TransformerLM(vocab_size=vocab_size,
+                          context_length=context_length,
+                          num_layers=num_layers,
+                          d_model=d_model,
+                          num_heads=num_heads,
+                          d_ff=d_ff,
+                          rope_theta=rope_theta,
+                          device=device,
+                          dtype=dtype,
+                          ).eval()
+    _copy_param(model.token_embeddings.weights, weights["token_embeddings.weight"])
+
+    for layer_idx in range(num_layers):
+        pfx = f"layers.{layer_idx}."
+        block = model.blocks[layer_idx]
+
+        block.rms_norm_1.load_state_dict({"weights": weights[pfx + "ln1.weight"]})
+        block.rms_norm_2.load_state_dict({"weights": weights[pfx + "ln2.weight"]})
+
+        block.ff1.linear_1.load_state_dict({"weights": weights[pfx + "ffn.w1.weight"]})
+        block.ff1.linear_2.load_state_dict({"weights": weights[pfx + "ffn.w2.weight"]})
+        block.ff1.linear_3.load_state_dict({"weights": weights[pfx + "ffn.w3.weight"]})
+
+        block.casual_multihead_attention.q.load_state_dict({"weights": weights[pfx + "attn.q_proj.weight"]})
+        block.casual_multihead_attention.k.load_state_dict({"weights": weights[pfx + "attn.k_proj.weight"]})
+        block.casual_multihead_attention.v.load_state_dict({"weights": weights[pfx + "attn.v_proj.weight"]})
+        block.casual_multihead_attention.o.load_state_dict({"weights": weights[pfx + "attn.output_proj.weight"]})
+
+    model.norm_final.load_state_dict({"weights": weights["ln_final.weight"]})
+    model.lm_head.load_state_dict({"weights": weights["lm_head.weight"]})
+
+    return model(in_indices)
 
 def run_rmsnorm(
     d_model: int,
