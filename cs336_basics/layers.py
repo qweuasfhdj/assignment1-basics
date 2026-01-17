@@ -3,7 +3,7 @@ from symtable import Function
 import torch
 import einx
 from jaxtyping import Bool, Float, Int
-from torch import Tensor
+from torch import Tensor, FloatTensor
 import numpy as np
 
 class LinearLayer(torch.nn.Module):
@@ -123,10 +123,60 @@ class RoPE(torch.nn.Module):
         out[..., 1::2] = odd_part
         return out
 
-def SoftMax(x: Tensor, dim: int = -1) -> Tensor:
+def soft_max(x: Tensor, dim: int = -1) -> Tensor:
     max_x = torch.max(x, dim=dim, keepdim=True).values
     exp_sum = torch.sum(torch.exp(x - max_x), dim=dim, keepdim=True)
     return torch.exp(x - max_x) / exp_sum
+
+
+def scaled_dot_product(
+        Q: Float[Tensor, " ... seq_len_q d_k"],
+        K: Float[Tensor, " ... seq_len_k d_k"],
+        V: Float[Tensor, " ... seq_len_k d_v"],
+        mask: Bool[Tensor, " ... seq_len_q seq_len_k"] = None) -> torch.Tensor:
+    scale = 1.0 / torch.sqrt(torch.tensor(Q.shape[-1], dtype=torch.float32, device=Q.device))
+    attention_score = einx.dot("... queries d_k, ... keys d_k -> ... queries keys", Q, K) * scale
+    if mask is not None:
+        attention_score = attention_score.masked_fill(mask == 0, float("-inf"))
+    return einx.dot("... queries keys, ... keys dim_v -> ... queries dim_v", soft_max(attention_score), V)
+
+class MultiHeadAttention(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, use_rope: bool, max_seq_len: int, theta: float, device = None, dtype = None):
+        super(MultiHeadAttention, self).__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        self.d_v = d_model // num_heads
+        self.q = LinearLayer(d_model, d_model, device=device, dtype=dtype)
+        self.k = LinearLayer(d_model, d_model, device=device, dtype=dtype)
+        self.v = LinearLayer(d_model, d_model, device=device, dtype=dtype)
+        self.o = LinearLayer(d_model, d_model, device=device, dtype=dtype)
+        self.use_rope = use_rope
+        mask = torch.tril(torch.ones(max_seq_len, max_seq_len, device=device), diagonal=0).bool()
+        self.register_buffer("casual_mask", mask.unsqueeze(0).unsqueeze(0), persistent=False)
+        if use_rope:
+            self.RoPE = RoPE(d_k=self.d_k, max_seq_len=max_seq_len, theta=theta, device=device)
+
+    def forward(self, x: FloatTensor, token_positions: Int[Tensor, " ... sequence_length"] = None) -> FloatTensor:
+        # rearrange to multi head
+        sequence_length = x.shape[-2]
+
+        q_x = einx.rearrange("... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", self.q(x),
+                             num_heads=self.num_heads)
+        k_x = einx.rearrange("... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", self.k(x),
+                             num_heads=self.num_heads)
+        v_x = einx.rearrange("... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", self.v(x),
+                             num_heads=self.num_heads)
+
+        # apply rope to different head blocks
+        if self.use_rope:
+            q_x = self.RoPE(q_x, token_positions=token_positions)
+            k_x = self.RoPE(k_x, token_positions=token_positions)  # auto broadcast
+
+        scores = scaled_dot_product(q_x, k_x, v_x, self.casual_mask[..., :sequence_length, :sequence_length])
+        scores = einx.rearrange("... num_heads seq_len d_k -> ... seq_len (num_heads d_k)", scores)
+
+        return self.o(scores)
 
 if __name__ == "__main__":
     # model = LinearLayer(10, 10, device=torch.device('cpu'))
@@ -138,5 +188,5 @@ if __name__ == "__main__":
     x = torch.randn(2, 3, 3, device=torch.device('cpu'))
     exp_x = torch.exp(x)
     print(exp_x.shape)
-    res = SoftMax(x)
+    res = soft_max(x)
     print(res)

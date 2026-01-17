@@ -117,8 +117,7 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
-
+    return scaled_dot_product(Q=Q, K=K, V=V, mask=mask)
 
 def run_multihead_self_attention(
     d_model: int,
@@ -140,19 +139,27 @@ def run_multihead_self_attention(
     Args:
         d_model (int): Dimensionality of the feedforward input and output.
         num_heads (int): Number of heads to use in multi-headed attention.
-        max_seq_len (int): Maximum sequence length to pre-cache if your implementation does that.
         q_proj_weight (Float[Tensor, "d_k d_in"]): Weights for the Q projection
         k_proj_weight (Float[Tensor, "d_k d_in"]): Weights for the K projection
         v_proj_weight (Float[Tensor, "d_k d_in"]): Weights for the V projection
         o_proj_weight (Float[Tensor, "d_model d_v"]): Weights for the output projection
-        in_f
-        eatures (Float[Tensor, "... sequence_length d_in"]): Tensor to run your implementation on.
+        in_features (Float[Tensor, "... sequence_length d_in"]): Tensor to run your implementation on.
 
     Returns:
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+
+    max_seq_len = in_features.shape[-2]  # Assuming in_features is of shape (..., sequence_length, d_in)
+    model = MultiHeadAttention(d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, use_rope=False,
+                               theta=10000.0, device=in_features.device, dtype=in_features.dtype)
+    model.load_state_dict({
+        "q.weights": q_proj_weight,
+        "k.weights": k_proj_weight,
+        "v.weights": v_proj_weight,
+        "o.weights": o_proj_weight,
+    })
+    return model(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -192,8 +199,16 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
-
+    max_seq_len = in_features.shape[-2]  # Assuming in_features is of shape (..., sequence_length, d_in)
+    model = MultiHeadAttention(d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, use_rope=token_positions is not None,
+                               theta=theta, device=in_features.device, dtype=in_features.dtype)
+    model.load_state_dict({
+        "q.weights": q_proj_weight,
+        "k.weights": k_proj_weight,
+        "v.weights": v_proj_weight,
+        "o.weights": o_proj_weight,
+    })
+    return model(in_features, token_positions=token_positions)
 
 def run_rope(
     d_k: int,
@@ -303,7 +318,8 @@ def run_transformer_lm(
     weights: dict[str, Tensor],
     in_indices: Int[Tensor, " batch_size sequence_length"],
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
-    """Given the weights of a Transformer language model and input indices,
+    """
+    Given the weights of a Transformer language model and input indices,
     return the output of running a forward pass on the input indices.
 
     This function should use RoPE.
@@ -450,7 +466,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         softmax normalizing the specified `dim`.
     """
 
-    return SoftMax(x=in_features, dim=dim)
+    return soft_max(x=in_features, dim=dim)
 
 
 def run_cross_entropy(
