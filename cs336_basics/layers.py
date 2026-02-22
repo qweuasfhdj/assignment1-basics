@@ -20,6 +20,20 @@ class LinearLayer(torch.nn.Module):
         res = einx.dot('... in_features, out_features in_features -> ... out_features', x, self.weights)
         return res
 
+def log_softmax(x: Tensor) -> Tensor:
+    x_max = torch.max(x, dim=-1, keepdim=True).values
+    x_shifted = x - x_max
+    log_sum_exp = torch.log(torch.sum(torch.exp(x_shifted), dim=-1, keepdim=True))
+    return x_shifted - log_sum_exp
+
+def cross_entropy(inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]) -> Float[Tensor, ""]:
+    """Given a tensor of inputs and targets, compute the average cross-entropy"""
+    # inputs(Float[Tensor, "batch_size vocab_size"]): inputs[i][j] is the
+    # targets (Int[Tensor, "batch_size"]): Tensor of shape (batch_size,) with the index of the correct class.
+    batch_size = inputs.shape[0]
+    batch_arang = torch.arange(batch_size)
+    return - torch.sum(log_softmax(inputs)[batch_arang, targets]) / batch_size
+
 class Embedding(torch.nn.Module):
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
         super(Embedding, self).__init__()
